@@ -18,6 +18,7 @@ concurrency:
 
 env:
   SOURCE_REPOSITORY: qian-lou/writer-agent
+  DISTRIBUTION_REPOSITORY: qian-lou/writer-agent-downloads
   RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
@@ -230,18 +231,22 @@ jobs:
             exit 1
           fi
 
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')"
+          if gh release view "$RELEASE_TAG" --repo "$DISTRIBUTION_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$RELEASE_TAG" \
+              --repo "$DISTRIBUTION_REPOSITORY" --json isDraft --jq '.isDraft')"
             if [[ "$is_draft" != "true" ]]; then
               echo "公开 Release 已发布，拒绝覆盖: $RELEASE_TAG" >&2
               exit 1
             fi
           else
             gh release create "$RELEASE_TAG" \
+              --repo "$DISTRIBUTION_REPOSITORY" \
               --title "Writer Agent $RELEASE_TAG" \
               --notes "闭源桌面客户端安装包。请使用 SHA256SUMS.txt 校验下载文件。" \
               --draft
           fi
 
-          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
-          gh release edit "$RELEASE_TAG" --draft=false
+          gh release upload "$RELEASE_TAG" "${assets[@]}" \
+            --repo "$DISTRIBUTION_REPOSITORY" --clobber
+          gh release edit "$RELEASE_TAG" \
+            --repo "$DISTRIBUTION_REPOSITORY" --draft=false
