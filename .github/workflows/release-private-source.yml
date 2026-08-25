@@ -1,0 +1,247 @@
+name: 构建并发布闭源桌面客户端
+run-name: 发布 Writer Agent ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 私有源码仓库中已存在的版本标签，例如 v0.1.5
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-source-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: qian-lou/writer-agent
+  RELEASE_TAG: ${{ inputs.tag }}
+
+jobs:
+  preflight:
+    name: 校验私有源码版本
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: 检出指定私有源码标签
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.RELEASE_TAG }}
+          ssh-key: ${{ secrets.PRIVATE_SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: source
+
+      - name: 校验版本与生产服务地址
+        id: version
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "版本标签格式错误: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          version="${RELEASE_TAG#v}"
+          tauri_version="$(node -p "JSON.parse(require('fs').readFileSync('app/src-tauri/tauri.conf.json', 'utf8')).version")"
+          cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' app/src-tauri/Cargo.toml | head -n 1)"
+          cert_server_url="$(sed -nE 's/^const CERT_SERVER_URL: &str = "([^"]+)";/\1/p' app/src-tauri/src/writer_harness/certificate.rs)"
+
+          if [[ "$version" != "$tauri_version" || "$version" != "$cargo_version" ]]; then
+            echo "版本不一致: tag=$version tauri=$tauri_version cargo=$cargo_version" >&2
+            exit 1
+          fi
+          if [[ "$cert_server_url" != "https://www.foodspace.cloud/writer-agent/api" ]]; then
+            echo "发布版证书服务地址错误: $cert_server_url" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: 构建 ${{ matrix.name }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS-ARM64
+            platform: macos-latest
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - name: macOS-Intel
+            platform: macos-latest
+            target: x86_64-apple-darwin
+            bundles: dmg
+          - name: Windows-x64
+            platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - name: Linux-x64
+            platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 240
+    steps:
+      - name: 安装 Linux 系统依赖
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libsoup-3.0-dev libssl-dev build-essential \
+            patchelf libfuse2 file
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: 安装 pnpm
+        shell: bash
+        run: npm install --global pnpm@10.32.1
+
+      - name: 安装 Rust 目标
+        shell: bash
+        run: |
+          rustup update stable --no-self-update
+          rustup target add "${{ matrix.target }}"
+
+      - name: 安装 protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ github.token }}
+
+      - name: 检出指定私有源码标签
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.RELEASE_TAG }}
+          ssh-key: ${{ secrets.PRIVATE_SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: source
+
+      - name: 安装前端依赖
+        working-directory: source/app
+        run: pnpm install --frozen-lockfile
+
+      - name: 配置 macOS 临时签名
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+
+      - name: 构建安装包
+        shell: bash
+        working-directory: source/app
+        env:
+          WRITER_HARNESS_TARGET: ${{ matrix.target }}
+        run: |
+          set +e
+          pnpm exec tauri build \
+            --target "${{ matrix.target }}" \
+            --bundles "${{ matrix.bundles }}" \
+            > "$RUNNER_TEMP/writer-agent-build.log" 2>&1
+          status=$?
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error::安装包构建失败；详细编译日志未公开，以避免泄露私有源码。"
+            exit "$status"
+          fi
+
+      - name: 上传平台安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: writer-agent-${{ needs.preflight.outputs.version }}-${{ matrix.name }}
+          path: |
+            source/app/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            source/app/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
+            source/app/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
+            source/app/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            source/app/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: 发布公开下载 Release
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: 下载全部平台安装包
+        uses: actions/download-artifact@v4
+        with:
+          pattern: writer-agent-${{ needs.preflight.outputs.version }}-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: 校验并发布 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p publish-assets
+
+          while IFS= read -r -d '' asset; do
+            name="$(basename "$asset")"
+            safe_name="${name// /.}"
+            if [[ -e "publish-assets/$safe_name" ]]; then
+              echo "安装包文件名冲突: $safe_name" >&2
+              exit 1
+            fi
+            cp "$asset" "publish-assets/$safe_name"
+          done < <(find release-assets -type f \( \
+            -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o \
+            -name '*.AppImage' -o -name '*.deb' \
+          \) -print0)
+
+          asset_count="$(find publish-assets -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          if [[ "$asset_count" != "6" ]]; then
+            echo "安装包数量异常: $asset_count" >&2
+            exit 1
+          fi
+          for pattern in '*.dmg' '*.msi' '*.exe' '*.AppImage' '*.deb'; do
+            if ! find publish-assets -maxdepth 1 -type f -name "$pattern" -print -quit | grep -q .; then
+              echo "缺少发布产物: $pattern" >&2
+              exit 1
+            fi
+          done
+
+          (
+            cd publish-assets
+            find . -maxdepth 1 -type f \( \
+              -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o \
+              -name '*.AppImage' -o -name '*.deb' \
+            \) -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          )
+
+          mapfile -d '' assets < <(find publish-assets -maxdepth 1 -type f -print0)
+          if [[ "${#assets[@]}" != "7" ]]; then
+            echo "发布资产数量异常: ${#assets[@]}" >&2
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "公开 Release 已发布，拒绝覆盖: $RELEASE_TAG" >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "Writer Agent $RELEASE_TAG" \
+              --notes "闭源桌面客户端安装包。请使用 SHA256SUMS.txt 校验下载文件。" \
+              --draft
+          fi
+
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          gh release edit "$RELEASE_TAG" --draft=false
