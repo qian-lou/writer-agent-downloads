@@ -80,11 +80,11 @@ jobs:
           - name: macOS-ARM64
             platform: macos-latest
             target: aarch64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
           - name: macOS-Intel
             platform: macos-latest
             target: x86_64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
           - name: Windows-x64
             platform: windows-latest
             target: x86_64-pc-windows-msvc
@@ -161,10 +161,16 @@ jobs:
             echo "::error::在线更新签名配置不完整。"
             exit 1
           fi
+          updater_config="$(node -e '
+            const pubkey = process.env.WRITER_AGENT_UPDATER_PUBLIC_KEY?.trim();
+            if (!pubkey) process.exit(1);
+            process.stdout.write(JSON.stringify({ plugins: { updater: { pubkey } } }));
+          ')"
           set +e
           pnpm exec tauri build \
             --target "${{ matrix.target }}" \
             --bundles "${{ matrix.bundles }}" \
+            --config "$updater_config" \
             > "$RUNNER_TEMP/writer-agent-build.log" 2>&1
           status=$?
           if [[ "$status" -ne 0 ]]; then
@@ -182,6 +188,7 @@ jobs:
             classify_failure RUNTIME_BUNDLE 'bundle-writer-harness|writer-harness-runtime'
             classify_failure GATEWAY_BUNDLE 'bundle-gateway-sidecar|gateway-sidecar'
             classify_failure UPDATER_SIGNING 'failed to sign|signing.*failed|private key|incorrect password|invalid password'
+            classify_failure UPDATER_CONFIG 'failed to decode pubkey|failed to convert updater pubkey|Missing comment in public key|no private key|signature creation'
             classify_failure TAURI_BUNDLER 'failed to bundle|bundle project'
             classify_failure APPIMAGE 'AppImage|appimagetool|linuxdeploy'
             classify_failure DEBIAN_PACKAGE 'dpkg|\.deb([^a-z]|$)|debian package'
@@ -190,6 +197,7 @@ jobs:
             classify_failure MISSING_FILE 'no such file or directory|cannot find the (path|file)|file not found'
             classify_failure PERMISSION 'permission denied|access is denied'
             classify_failure NETWORK 'failed to download|error sending request|dns error|timed out|connection reset'
+            classify_failure NETWORK_RESOLUTION 'failed to lookup address information|temporary failure in name resolution|could not resolve host|name or service not known'
             classify_failure DISK 'no space left on device|disk full'
             classify_failure MEMORY 'out of memory|memory allocation.*failed'
             classify_failure PANIC 'panicked at|thread .* panicked'
