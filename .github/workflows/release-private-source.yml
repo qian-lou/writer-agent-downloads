@@ -168,6 +168,31 @@ jobs:
             > "$RUNNER_TEMP/writer-agent-build.log" 2>&1
           status=$?
           if [[ "$status" -ne 0 ]]; then
+            classify_failure() {
+              local label="$1"
+              local pattern="$2"
+              local count
+              count="$(grep -Eic -- "$pattern" "$RUNNER_TEMP/writer-agent-build.log" || true)"
+              echo "BUILD_FAILURE_$label=$count"
+            }
+
+            classify_failure BEFORE_BUILD_COMMAND 'beforeBuildCommand.*failed|before build command.*failed'
+            classify_failure RUST_COMPILE 'error\[E[0-9]{4}\]|could not compile'
+            classify_failure LINKER 'linking with .* failed|linker .* not found|link\.exe.*failed'
+            classify_failure RUNTIME_BUNDLE 'bundle-writer-harness|writer-harness-runtime'
+            classify_failure GATEWAY_BUNDLE 'bundle-gateway-sidecar|gateway-sidecar'
+            classify_failure UPDATER_SIGNING 'failed to sign|signing.*failed|private key|incorrect password|invalid password'
+            classify_failure TAURI_BUNDLER 'failed to bundle|bundle project'
+            classify_failure APPIMAGE 'AppImage|appimagetool|linuxdeploy'
+            classify_failure DEBIAN_PACKAGE 'dpkg|\.deb([^a-z]|$)|debian package'
+            classify_failure WINDOWS_MSI 'light\.exe|candle\.exe|wix|\.msi([^a-z]|$)'
+            classify_failure WINDOWS_NSIS 'makensis|nsis'
+            classify_failure MISSING_FILE 'no such file or directory|cannot find the (path|file)|file not found'
+            classify_failure PERMISSION 'permission denied|access is denied'
+            classify_failure NETWORK 'failed to download|error sending request|dns error|timed out|connection reset'
+            classify_failure DISK 'no space left on device|disk full'
+            classify_failure MEMORY 'out of memory|memory allocation.*failed'
+            classify_failure PANIC 'panicked at|thread .* panicked'
             echo "::error::安装包构建失败；详细编译日志未公开，以避免泄露私有源码。"
             exit "$status"
           fi
