@@ -29,6 +29,11 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      - name: 检出生产发布工作流
+        uses: actions/checkout@v4
+        with:
+          path: distribution
+
       - name: 检出指定私有源码标签
         uses: actions/checkout@v4
         with:
@@ -69,6 +74,9 @@ jobs:
             exit 1
           fi
           bash scripts/check-release-notes.sh "$RELEASE_TAG" RELEASE_NOTES.md
+          bash scripts/check-release-signing-contract.sh \
+            "$GITHUB_WORKSPACE/distribution/.github/workflows/release-private-source.yml" \
+            "$GITHUB_WORKSPACE/source/app/src-tauri/tauri.conf.json"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
@@ -141,10 +149,70 @@ jobs:
         working-directory: source/app
         run: pnpm install --frozen-lockfile
 
-      - name: 配置 macOS 临时签名
+      - name: 导入并校验 macOS 自签名证书
         if: runner.os == 'macOS'
         shell: bash
-        run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_CERTIFICATE_SHA256: ${{ secrets.MACOS_CERTIFICATE_SHA256 }}
+          MACOS_SIGNING_IDENTITY: Writer Agent Local Release
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD MACOS_CERTIFICATE_SHA256; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "缺少 macOS 发布 Secrets: ${missing[*]}" >&2
+            exit 1
+          fi
+          expected_fingerprint="$(tr -d '[:space:]:' <<<"$MACOS_CERTIFICATE_SHA256" \
+            | tr '[:lower:]' '[:upper:]')"
+          if [[ ! "$expected_fingerprint" =~ ^[A-F0-9]{64}$ ]]; then
+            echo "MACOS_CERTIFICATE_SHA256 必须是 64 位 SHA-256 指纹" >&2
+            exit 1
+          fi
+
+          certificate_path="$RUNNER_TEMP/writer-agent-signing.p12"
+          certificate_pem_path="$RUNNER_TEMP/writer-agent-signing.pem"
+          keychain_path="$RUNNER_TEMP/writer-agent-signing.keychain-db"
+          keychain_password="$(/usr/bin/openssl rand -hex 32)"
+          trap 'rm -f "$certificate_path"' EXIT
+          echo "WRITER_AGENT_SIGNING_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          echo "WRITER_AGENT_SIGNING_CERTIFICATE_PATH=$certificate_pem_path" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_IDENTITY=$MACOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          printf '%s' "$MACOS_CERTIFICATE" \
+            | /usr/bin/openssl base64 -d -A -out "$certificate_path"
+          /usr/bin/openssl pkcs12 -in "$certificate_path" -nokeys \
+            -passin env:MACOS_CERTIFICATE_PASSWORD -out "$certificate_pem_path"
+          actual_fingerprint="$(/usr/bin/openssl x509 -in "$certificate_pem_path" \
+            -outform DER | /usr/bin/shasum -a 256 | awk '{print toupper($1)}')"
+          if [[ "$actual_fingerprint" != "$expected_fingerprint" ]]; then
+            echo "macOS 签名证书指纹与 MACOS_CERTIFICATE_SHA256 不匹配" >&2
+            exit 1
+          fi
+
+          /usr/bin/security create-keychain -p "$keychain_password" "$keychain_path"
+          /usr/bin/security unlock-keychain -p "$keychain_password" "$keychain_path"
+          /usr/bin/security set-keychain-settings -t 3600 -u "$keychain_path"
+          /usr/bin/security import "$certificate_path" \
+            -k "$keychain_path" -f pkcs12 -t agg \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          sudo /usr/bin/security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$certificate_pem_path"
+          /usr/bin/security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s \
+            -k "$keychain_password" "$keychain_path"
+          /usr/bin/security list-keychains -d user -s "$keychain_path"
+          /usr/bin/security default-keychain -d user -s "$keychain_path"
+          if ! /usr/bin/security find-identity -v -p codesigning "$keychain_path" \
+            | grep -Fq "\"$MACOS_SIGNING_IDENTITY\""; then
+            echo "导入的证书不是预期的 Writer Agent 代码签名身份" >&2
+            exit 1
+          fi
 
       - name: 构建安装包
         shell: bash
@@ -204,6 +272,33 @@ jobs:
             classify_failure PANIC 'panicked at|thread .* panicked'
             echo "::error::安装包构建失败；详细编译日志未公开，以避免泄露私有源码。"
             exit "$status"
+          fi
+
+      - name: 校验 macOS 稳定自签名
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: source
+        env:
+          MACOS_CERTIFICATE_SHA256: ${{ secrets.MACOS_CERTIFICATE_SHA256 }}
+        run: >-
+          bash scripts/check-macos-release-signing.sh
+          "app/src-tauri/target/${{ matrix.target }}/release/bundle/macos/Writer Agent.app"
+          "com.writer-agent.dev"
+          "$MACOS_CERTIFICATE_SHA256"
+
+      - name: 清理 macOS 临时钥匙串
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [[ -n "${WRITER_AGENT_SIGNING_CERTIFICATE_PATH:-}" \
+            && -f "$WRITER_AGENT_SIGNING_CERTIFICATE_PATH" ]]; then
+            sudo /usr/bin/security remove-trusted-cert -d \
+              "$WRITER_AGENT_SIGNING_CERTIFICATE_PATH" || true
+            rm -f "$WRITER_AGENT_SIGNING_CERTIFICATE_PATH"
+          fi
+          if [[ -n "${WRITER_AGENT_SIGNING_KEYCHAIN_PATH:-}" \
+            && -f "$WRITER_AGENT_SIGNING_KEYCHAIN_PATH" ]]; then
+            /usr/bin/security delete-keychain "$WRITER_AGENT_SIGNING_KEYCHAIN_PATH"
           fi
 
       - name: 上传平台安装包
