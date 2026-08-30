@@ -68,6 +68,7 @@ jobs:
             echo "缺少在线更新签名公钥变量" >&2
             exit 1
           fi
+          bash scripts/check-release-notes.sh "$RELEASE_TAG" RELEASE_NOTES.md
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
@@ -228,6 +229,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: 检出版本更新说明
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.RELEASE_TAG }}
+          ssh-key: ${{ secrets.PRIVATE_SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: source
+
       - name: 下载全部平台安装包
         uses: actions/download-artifact@v4
         with:
@@ -240,6 +250,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          release_notes_file="source/RELEASE_NOTES.md"
+          bash source/scripts/check-release-notes.sh "$RELEASE_TAG" "$release_notes_file"
           mkdir -p publish-assets
 
           copy_unique() {
@@ -328,7 +340,7 @@ jobs:
 
           jq -n \
             --arg version "${RELEASE_TAG#v}" \
-            --arg notes "修复问题并新增应用内在线更新等功能。" \
+            --rawfile notes "$release_notes_file" \
             --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg macos_arm_url "$(release_url "$macos_arm_update")" \
             --arg macos_arm_signature "$(tr -d '\r\n' < "$macos_arm_update.sig")" \
@@ -399,11 +411,13 @@ jobs:
             gh release create "$RELEASE_TAG" \
               --repo "$DISTRIBUTION_REPOSITORY" \
               --title "Writer Agent $RELEASE_TAG" \
-              --notes "闭源桌面客户端安装包。此版本首次启用应用内更新；从旧版本升级需手动安装一次。请使用 SHA256SUMS.txt 校验下载文件。" \
+              --notes-file "$release_notes_file" \
               --draft
           fi
 
           gh release upload "$RELEASE_TAG" "${assets[@]}" \
             --repo "$DISTRIBUTION_REPOSITORY" --clobber
           gh release edit "$RELEASE_TAG" \
-            --repo "$DISTRIBUTION_REPOSITORY" --draft=false
+            --repo "$DISTRIBUTION_REPOSITORY" \
+            --notes-file "$release_notes_file" \
+            --draft=false
