@@ -292,7 +292,8 @@ jobs:
         run: |
           if [[ -n "${WRITER_AGENT_SIGNING_CERTIFICATE_PATH:-}" \
             && -f "$WRITER_AGENT_SIGNING_CERTIFICATE_PATH" ]]; then
-            sudo /usr/bin/security remove-trusted-cert -d \
+            sudo /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 \
+              /usr/bin/security remove-trusted-cert -d \
               "$WRITER_AGENT_SIGNING_CERTIFICATE_PATH" || true
             rm -f "$WRITER_AGENT_SIGNING_CERTIFICATE_PATH"
           fi
