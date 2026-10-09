@@ -127,8 +127,9 @@ jobs:
       - name: 安装 Rust 目标
         shell: bash
         run: |
-          rustup update stable --no-self-update
-          rustup target add "${{ matrix.target }}"
+          rustup toolchain install 1.90.0 --profile minimal --no-self-update
+          rustup default 1.90.0
+          rustup target add --toolchain 1.90.0 "${{ matrix.target }}"
 
       - name: 安装 protoc
         uses: arduino/setup-protoc@v3
