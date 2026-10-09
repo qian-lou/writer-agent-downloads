@@ -113,7 +113,7 @@ jobs:
             preflight_id="$(jq -r '.jobs[] | select(.name == "校验私有源码版本" and .conclusion == "success") | .id' "$jobs_file")"
             test -n "$preflight_id"
             source_commit="$(git rev-parse HEAD)"
-            gh api "repos/$DISTRIBUTION_REPOSITORY/actions/jobs/$preflight_id/logs" \
+            gh api "repos/$DISTRIBUTION_REPOSITORY/actions/jobs/$preflight_id/logs" --allow-escape-sequences \
               > "$RUNNER_TEMP/reuse-preflight.log"
             grep -Eq "[[:space:]]$source_commit[[:space:]]*$" "$RUNNER_TEMP/reuse-preflight.log"
           fi
