@@ -59,7 +59,18 @@ jobs:
           version="${RELEASE_TAG#v}"
           tauri_version="$(node -p "JSON.parse(require('fs').readFileSync('app/src-tauri/tauri.conf.json', 'utf8')).version")"
           cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' app/src-tauri/Cargo.toml | head -n 1)"
-          cert_server_url="$(sed -nE 's/^const CERT_SERVER_URL: &str = "([^"]+)";/\1/p' app/src-tauri/src/creator_harness/certificate.rs)"
+          cert_server_url="$(node -e '
+            const fs = require("fs");
+            const account = fs.readFileSync("app/src-tauri/src/creator_harness/account_auth.rs", "utf8");
+            const certificate = fs.readFileSync("app/src-tauri/src/creator_harness/certificate.rs", "utf8");
+            const production = account.match(/#\[cfg\(not\(debug_assertions\)\)\]\s*pub\(super\)\s+const\s+CLIENT_SERVER_URL\s*:\s*&str\s*=\s*"([^"]+)"\s*;/);
+            const shared = /const\s+CERT_SERVER_URL\s*:\s*&str\s*=\s*CLIENT_SERVER_URL\s*;/.test(certificate);
+            if (!production || !shared) {
+              process.stderr.write("发布服务地址契约不完整\n");
+              process.exit(1);
+            }
+            process.stdout.write(production[1]);
+          ')"
 
           if [[ "$version" != "$tauri_version" || "$version" != "$cargo_version" ]]; then
             echo "版本不一致: tag=$version tauri=$tauri_version cargo=$cargo_version" >&2
