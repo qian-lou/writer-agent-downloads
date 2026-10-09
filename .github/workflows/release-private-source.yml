@@ -1,5 +1,5 @@
 name: 构建并发布闭源桌面客户端
-run-name: 发布 Writer Agent ${{ inputs.tag }}
+run-name: 发布 Creator Harness ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
           WRITER_AGENT_UPDATER_PUBLIC_KEY: ${{ vars.WRITER_AGENT_UPDATER_PUBLIC_KEY }}
         run: |
           set -euo pipefail
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$ ]]; then
             echo "版本标签格式错误: $RELEASE_TAG" >&2
             exit 1
           fi
@@ -59,7 +59,7 @@ jobs:
           version="${RELEASE_TAG#v}"
           tauri_version="$(node -p "JSON.parse(require('fs').readFileSync('app/src-tauri/tauri.conf.json', 'utf8')).version")"
           cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' app/src-tauri/Cargo.toml | head -n 1)"
-          cert_server_url="$(sed -nE 's/^const CERT_SERVER_URL: &str = "([^"]+)";/\1/p' app/src-tauri/src/writer_harness/certificate.rs)"
+          cert_server_url="$(sed -nE 's/^const CERT_SERVER_URL: &str = "([^"]+)";/\1/p' app/src-tauri/src/creator_harness/certificate.rs)"
 
           if [[ "$version" != "$tauri_version" || "$version" != "$cargo_version" ]]; then
             echo "版本不一致: tag=$version tauri=$tauri_version cargo=$cargo_version" >&2
@@ -282,7 +282,7 @@ jobs:
           MACOS_CERTIFICATE_SHA256: ${{ secrets.MACOS_CERTIFICATE_SHA256 }}
         run: >-
           bash scripts/check-macos-release-signing.sh
-          "app/src-tauri/target/${{ matrix.target }}/release/bundle/macos/Writer Agent.app"
+          "app/src-tauri/target/${{ matrix.target }}/release/bundle/macos/Creator Harness.app"
           "com.writer-agent.dev"
           "$MACOS_CERTIFICATE_SHA256"
 
@@ -379,7 +379,7 @@ jobs:
               echo "缺少 macOS $architecture 更新包或签名" >&2
               exit 1
             fi
-            local destination="Writer.Agent_${{ needs.preflight.outputs.version }}_${architecture}.app.tar.gz"
+            local destination="Creator.Harness_${{ needs.preflight.outputs.version }}_${architecture}.app.tar.gz"
             copy_unique "$archive" "$destination"
             copy_unique "$archive.sig" "$destination.sig"
           }
@@ -428,8 +428,8 @@ jobs:
               "$DISTRIBUTION_REPOSITORY" "$RELEASE_TAG" "$(basename "$asset")"
           }
 
-          macos_arm_update="publish-assets/Writer.Agent_${{ needs.preflight.outputs.version }}_aarch64.app.tar.gz"
-          macos_intel_update="publish-assets/Writer.Agent_${{ needs.preflight.outputs.version }}_x64.app.tar.gz"
+          macos_arm_update="publish-assets/Creator.Harness_${{ needs.preflight.outputs.version }}_aarch64.app.tar.gz"
+          macos_intel_update="publish-assets/Creator.Harness_${{ needs.preflight.outputs.version }}_x64.app.tar.gz"
           windows_nsis_update="$(single_asset '*.exe')"
           windows_msi_update="$(single_asset '*.msi')"
           linux_update="$(single_asset '*.AppImage')"
@@ -504,16 +504,24 @@ jobs:
               exit 1
             fi
           else
+            release_flags=(--draft)
+            if [[ "$RELEASE_TAG" == *-beta.* ]]; then
+              release_flags+=(--prerelease --latest=false)
+            fi
             gh release create "$RELEASE_TAG" \
               --repo "$DISTRIBUTION_REPOSITORY" \
-              --title "Writer Agent $RELEASE_TAG" \
+              --title "Creator Harness $RELEASE_TAG" \
               --notes-file "$release_notes_file" \
-              --draft
+              "${release_flags[@]}"
           fi
 
           gh release upload "$RELEASE_TAG" "${assets[@]}" \
             --repo "$DISTRIBUTION_REPOSITORY" --clobber
+          release_flags=(--draft=false)
+          if [[ "$RELEASE_TAG" == *-beta.* ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
           gh release edit "$RELEASE_TAG" \
             --repo "$DISTRIBUTION_REPOSITORY" \
             --notes-file "$release_notes_file" \
-            --draft=false
+            "${release_flags[@]}"
