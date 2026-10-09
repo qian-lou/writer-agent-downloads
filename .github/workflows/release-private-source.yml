@@ -269,7 +269,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           PYTHONUTF8: "1"
           PYTHONIOENCODING: utf-8
-          CREATOR_RELEASE_DIAGNOSTIC_PUBLIC_KEY: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQm9qQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FZOEFNSUlCaWdLQ0FZRUE1eVprQnVnT044WDVFTEVyS1EwbAp3M1dKN2VlQUY3aGJ1SVdpaVVrTVorQVYzZ2U0OGNoK0RUSXhTcFJOTi94TzY1VHJSeUhVdkF5Q20wdnBEbHhDClk1Z0ZITlNJQjh5ZnZza290RFl4SlplRUw1bVhVazZWL2YrWkxFWTNkY2dCcWh3SndMMkcrL1JNYjJNclFsZVEKWkZtdFlJUVRYdXpZcy8zdXJ2WVUrM2ltSkhKZ0owSWNTcFNVRnBjVHBJVkVKVmJJQmZoYlZvQW5udEZsK3BvRQppeTllWnJSSVJXbksvVkU0ZTZWcE9BUllIZ0VGeXhoUWdIQ0EvT3NNWVZDMHVPK0RSSFhNY0hCNGo5YklSbkxECnZ1RlRnYkM5aUZlUjZDNkxzeEV0Uis5NXR4dnIweEtuWVQxL1VmRVlBN1VJdDN1UG5FWjJ2TW9MM1hkYjlibGsKSkt0SE5RaUpDczNwVy9ERWpOZ0pTQ2lFRGtFaU9KUlo4ei9yUGduWWJad21NNWJiSWlIYTNkbWdRR2tEdXNWQwoyV0lTSmp4OVl1U0UwWjdkbWxiT3JNcWxFWFlzaWJhMzEwbkpPZGlhUVJVZkZPSmdId3JmN0xrd0NIQ3liVkR5CmdTbTFWNVhBd0lSSEN6KzkrVFNFNXpENE9kMmhqaDF6M0p4WjI0Q1M0ZXpiQWdNQkFBRT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==
         run: |
           set -euo pipefail
           if [[ -z "${WRITER_AGENT_UPDATER_PUBLIC_KEY:-}" \
@@ -282,6 +281,7 @@ jobs:
             const pubkey = process.env.WRITER_AGENT_UPDATER_PUBLIC_KEY?.trim();
             if (!pubkey) process.exit(1);
             const config = { plugins: { updater: { pubkey } } };
+            // 时间 O(L)，空间 O(L)，L 为版本标签长度。
             const beta = /^v(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$/.exec(process.env.RELEASE_TAG ?? "");
             if (process.env.WRITER_HARNESS_TARGET === "x86_64-pc-windows-msvc" && beta) {
               // MSI 仅使用数字安装器版本，客户端显示的 Beta 版本保持不变。
@@ -303,23 +303,6 @@ jobs:
             > "$RUNNER_TEMP/writer-agent-build.log" 2>&1
           status=$?
           if [[ "$status" -ne 0 ]]; then
-            # 时间 O(B)，空间 O(B)，B 为失败日志字节数；诊断只输出公钥加密后的内容。
-            node -e '
-              const fs = require("fs");
-              const path = require("path");
-              const crypto = require("crypto");
-              const publicKey = Buffer.from(process.env.CREATOR_RELEASE_DIAGNOSTIC_PUBLIC_KEY, "base64").toString("utf8");
-              const key = crypto.randomBytes(32);
-              const iv = crypto.randomBytes(12);
-              const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-              const log = fs.readFileSync(path.join(process.env.RUNNER_TEMP, "writer-agent-build.log"));
-              const ciphertext = Buffer.concat([cipher.update(log), cipher.final()]);
-              const wrappedKey = crypto.publicEncrypt({key:publicKey,oaepHash:"sha256"}, key);
-              fs.writeFileSync(path.join(process.env.RUNNER_TEMP, "writer-agent-build.log.encrypted.json"), JSON.stringify({
-                version:1, wrappedKey:wrappedKey.toString("base64"), iv:iv.toString("base64"),
-                authTag:cipher.getAuthTag().toString("base64"), ciphertext:ciphertext.toString("base64")
-              }));
-            '
             classify_failure() {
               local label="$1"
               local pattern="$2"
@@ -350,15 +333,6 @@ jobs:
             echo "::error::安装包构建失败；详细编译日志未公开，以避免泄露私有源码。"
             exit "$status"
           fi
-
-      - name: 保存加密构建诊断
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: encrypted-build-log-${{ matrix.name }}
-          path: ${{ runner.temp }}/writer-agent-build.log.encrypted.json
-          if-no-files-found: ignore
-          retention-days: 1
 
       - name: 校验 macOS 稳定自签名
         if: runner.os == 'macOS'
