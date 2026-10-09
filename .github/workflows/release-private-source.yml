@@ -8,12 +8,18 @@ on:
         description: 私有源码仓库中已存在的版本标签，例如 v0.1.5
         required: true
         type: string
+      reuse_run_id:
+        description: 复用同一源码提交的成功 Linux 与 macOS 产物，仅重建 Windows
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: private-source-release-${{ inputs.tag }}
+  group: private-source-release-${{ inputs.tag }}${{ inputs.reuse_run_id != '' && '-windows-retry' || '' }}
   cancel-in-progress: false
 
 env:
@@ -49,6 +55,8 @@ jobs:
         working-directory: source
         env:
           WRITER_AGENT_UPDATER_PUBLIC_KEY: ${{ vars.WRITER_AGENT_UPDATER_PUBLIC_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
         run: |
           set -euo pipefail
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$ ]]; then
@@ -88,6 +96,27 @@ jobs:
           bash scripts/check-release-signing-contract.sh \
             "$GITHUB_WORKSPACE/distribution/.github/workflows/release-private-source.yml" \
             "$GITHUB_WORKSPACE/source/app/src-tauri/tauri.conf.json"
+          if [[ -n "$REUSE_RUN_ID" ]]; then
+            if [[ ! "$REUSE_RUN_ID" =~ ^[0-9]+$ ]]; then
+              echo "复用构建运行 ID 必须为数字" >&2
+              exit 1
+            fi
+            jobs_file="$RUNNER_TEMP/reuse-jobs.json"
+            gh api "repos/$DISTRIBUTION_REPOSITORY/actions/runs/$REUSE_RUN_ID/jobs" > "$jobs_file"
+            jq -e '[.jobs[] | select(.name == "构建 Windows-x64" and .conclusion == "failure")] | length == 1' \
+              "$jobs_file" >/dev/null
+            for platform_name in Linux-x64 macOS-ARM64 macOS-Intel; do
+              jq -e --arg name "构建 $platform_name" \
+                '[.jobs[] | select(.name == $name and (.conclusion == null or .conclusion == "success"))] | length == 1' \
+                "$jobs_file" >/dev/null
+            done
+            preflight_id="$(jq -r '.jobs[] | select(.name == "校验私有源码版本" and .conclusion == "success") | .id' "$jobs_file")"
+            test -n "$preflight_id"
+            source_commit="$(git rev-parse HEAD)"
+            gh api "repos/$DISTRIBUTION_REPOSITORY/actions/jobs/$preflight_id/logs" \
+              > "$RUNNER_TEMP/reuse-preflight.log"
+            grep -Eq "[[:space:]]$source_commit[[:space:]]*$" "$RUNNER_TEMP/reuse-preflight.log"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
@@ -96,23 +125,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: macOS-ARM64
-            platform: macos-latest
-            target: aarch64-apple-darwin
-            bundles: app,dmg
-          - name: macOS-Intel
-            platform: macos-latest
-            target: x86_64-apple-darwin
-            bundles: app,dmg
-          - name: Windows-x64
-            platform: windows-latest
-            target: x86_64-pc-windows-msvc
-            bundles: nsis,msi
-          - name: Linux-x64
-            platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            bundles: appimage,deb
+        include: ${{ fromJSON(inputs.reuse_run_id != '' && '[{"name":"Windows-x64","platform":"windows-latest","target":"x86_64-pc-windows-msvc","bundles":"nsis,msi"}]' || '[{"name":"macOS-ARM64","platform":"macos-latest","target":"aarch64-apple-darwin","bundles":"app,dmg"},{"name":"macOS-Intel","platform":"macos-latest","target":"x86_64-apple-darwin","bundles":"app,dmg"},{"name":"Windows-x64","platform":"windows-latest","target":"x86_64-pc-windows-msvc","bundles":"nsis,msi"},{"name":"Linux-x64","platform":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","bundles":"appimage,deb"}]') }}
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 240
     steps:
@@ -254,6 +267,8 @@ jobs:
           WRITER_AGENT_UPDATER_PUBLIC_KEY: ${{ vars.WRITER_AGENT_UPDATER_PUBLIC_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
           CREATOR_RELEASE_DIAGNOSTIC_PUBLIC_KEY: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQm9qQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FZOEFNSUlCaWdLQ0FZRUE1eVprQnVnT044WDVFTEVyS1EwbAp3M1dKN2VlQUY3aGJ1SVdpaVVrTVorQVYzZ2U0OGNoK0RUSXhTcFJOTi94TzY1VHJSeUhVdkF5Q20wdnBEbHhDClk1Z0ZITlNJQjh5ZnZza290RFl4SlplRUw1bVhVazZWL2YrWkxFWTNkY2dCcWh3SndMMkcrL1JNYjJNclFsZVEKWkZtdFlJUVRYdXpZcy8zdXJ2WVUrM2ltSkhKZ0owSWNTcFNVRnBjVHBJVkVKVmJJQmZoYlZvQW5udEZsK3BvRQppeTllWnJSSVJXbksvVkU0ZTZWcE9BUllIZ0VGeXhoUWdIQ0EvT3NNWVZDMHVPK0RSSFhNY0hCNGo5YklSbkxECnZ1RlRnYkM5aUZlUjZDNkxzeEV0Uis5NXR4dnIweEtuWVQxL1VmRVlBN1VJdDN1UG5FWjJ2TW9MM1hkYjlibGsKSkt0SE5RaUpDczNwVy9ERWpOZ0pTQ2lFRGtFaU9KUlo4ei9yUGduWWJad21NNWJiSWlIYTNkbWdRR2tEdXNWQwoyV0lTSmp4OVl1U0UwWjdkbWxiT3JNcWxFWFlzaWJhMzEwbkpPZGlhUVJVZkZPSmdId3JmN0xrd0NIQ3liVkR5CmdTbTFWNVhBd0lSSEN6KzkrVFNFNXpENE9kMmhqaDF6M0p4WjI0Q1M0ZXpiQWdNQkFBRT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==
         run: |
           set -euo pipefail
@@ -380,9 +395,10 @@ jobs:
     name: 发布公开下载 Release
     needs: [preflight, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: write
+      actions: read
     steps:
       - name: 检出版本更新说明
         uses: actions/checkout@v4
@@ -393,7 +409,41 @@ jobs:
           persist-credentials: false
           path: source
 
-      - name: 下载全部平台安装包
+      - name: 等待并校验复用平台安装包
+        if: inputs.reuse_run_id != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
+        run: |
+          set -euo pipefail
+          reuse_ready=false
+          for attempt in {1..60}; do
+            gh api "repos/$DISTRIBUTION_REPOSITORY/actions/runs/$REUSE_RUN_ID/jobs" > "$RUNNER_TEMP/reuse-jobs.json"
+            if jq -e '[.jobs[] | select(.name == "构建 Linux-x64" or .name == "构建 macOS-ARM64" or .name == "构建 macOS-Intel")] | length == 3 and all(.conclusion == "success")' \
+              "$RUNNER_TEMP/reuse-jobs.json" >/dev/null; then
+              reuse_ready=true
+              break
+            fi
+            if jq -e '[.jobs[] | select(.name == "构建 Linux-x64" or .name == "构建 macOS-ARM64" or .name == "构建 macOS-Intel")] | any(.conclusion == "failure" or .conclusion == "cancelled")' \
+              "$RUNNER_TEMP/reuse-jobs.json" >/dev/null; then
+              echo "复用平台构建失败，拒绝发布" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          test "$reuse_ready" == true
+
+      - name: 下载已验证的成功平台安装包
+        if: inputs.reuse_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_run_id }}
+          pattern: writer-agent-${{ needs.preflight.outputs.version }}-*
+          path: release-assets
+
+      - name: 下载本次平台安装包
         uses: actions/download-artifact@v4
         with:
           pattern: writer-agent-${{ needs.preflight.outputs.version }}-*
