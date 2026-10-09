@@ -135,6 +135,26 @@ jobs:
         shell: bash
         run: npm install --global pnpm@10.32.1
 
+      - name: 补齐 Windows 摘要工具
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v sha256sum >/dev/null
+          mkdir -p "$RUNNER_TEMP/release-bin"
+          cat > "$RUNNER_TEMP/release-bin/shasum" <<'SHASUM'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "${1:-}" != "-a" || "${2:-}" != "256" ]]; then
+            echo "只支持发布脚本使用的 SHA-256 摘要参数" >&2
+            exit 1
+          fi
+          shift 2
+          exec sha256sum "$@"
+          SHASUM
+          chmod +x "$RUNNER_TEMP/release-bin/shasum"
+          echo "$RUNNER_TEMP/release-bin" >> "$GITHUB_PATH"
+
       - name: 安装 Rust 目标
         shell: bash
         run: |
@@ -256,6 +276,7 @@ jobs:
             > "$RUNNER_TEMP/writer-agent-build.log" 2>&1
           status=$?
           if [[ "$status" -ne 0 ]]; then
+            # 时间 O(B)，空间 O(B)，B 为失败日志字节数；诊断只输出公钥加密后的内容。
             node -e '
               const fs = require("fs");
               const path = require("path");
