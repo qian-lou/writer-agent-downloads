@@ -600,9 +600,6 @@ jobs:
             fi
           else
             release_flags=(--draft)
-            if [[ "$RELEASE_TAG" == *-beta.* ]]; then
-              release_flags+=(--prerelease --latest=false)
-            fi
             gh release create "$RELEASE_TAG" \
               --repo "$DISTRIBUTION_REPOSITORY" \
               --title "Creator Harness $RELEASE_TAG" \
@@ -612,10 +609,8 @@ jobs:
 
           gh release upload "$RELEASE_TAG" "${assets[@]}" \
             --repo "$DISTRIBUTION_REPOSITORY" --clobber
-          release_flags=(--draft=false)
-          if [[ "$RELEASE_TAG" == *-beta.* ]]; then
-            release_flags+=(--prerelease --latest=false)
-          fi
+          # Beta 版本号保留，但默认更新入口必须包含本次发布。
+          release_flags=(--draft=false --prerelease=false --latest)
           gh release edit "$RELEASE_TAG" \
             --repo "$DISTRIBUTION_REPOSITORY" \
             --notes-file "$release_notes_file" \
